@@ -55,6 +55,7 @@ client instead; it has the same `programs.cerbo` options.
 ## Using it
 
 ```
+cerbo                       prompt for the task (see below)
 cerbo [-y] [-v] <task...>   do something
   -y                        run every command without asking
   -v                        show command output
@@ -63,6 +64,12 @@ cerbo -T <lang> <text>      translate to <lang>
 echo ... | cerbo -t         text from stdin works too
 cerbo off                   unload the model now (e.g. before a game)
 ```
+
+**Bare `cerbo` is usually the better way in.** It opens a `cerbo>` prompt
+and loads the model while you type, so the answer starts as soon as you press
+Enter. And since the text never goes through your shell, `?`, `*`, `'` and `"`
+need no quoting (`cerbo what's this?` on the command line is a zsh glob
+error). `cerbo -t` / `cerbo -T <lang>` with no text work the same way.
 
 The model gets one tool, `run_shell`, and up to ten turns to look around and
 act. Every command is printed before it runs:
