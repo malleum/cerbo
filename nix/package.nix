@@ -1,0 +1,28 @@
+{
+  lib,
+  writers,
+  symlinkJoin,
+  makeWrapper,
+  pulseaudio,
+  jq,
+}: let
+  bare = writers.writePython3Bin "cerbo" {
+    flakeIgnore = ["E501" "E731" "W503"];
+  } (builtins.readFile ../cerbo.py);
+in
+  # pactl and jq are what the model reaches for first; --suffix so anything
+  # already on the user's PATH wins.
+  symlinkJoin {
+    name = "cerbo";
+    paths = [bare];
+    nativeBuildInputs = [makeWrapper];
+    postBuild = ''
+      wrapProgram $out/bin/cerbo \
+        --suffix PATH : ${lib.makeBinPath [pulseaudio jq]}
+    '';
+    meta = {
+      description = "Ask a local model to do something in the shell";
+      mainProgram = "cerbo";
+      platforms = lib.platforms.linux;
+    };
+  }
