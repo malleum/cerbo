@@ -23,6 +23,7 @@ in
     '';
     meta = {
       description = "Ask a local model to do something in the shell";
+      license = lib.licenses.mit;
       mainProgram = "cerbo";
       platforms = lib.platforms.unix;
     };

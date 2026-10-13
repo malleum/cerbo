@@ -173,3 +173,7 @@ python3 cerbo.py -v how much free space is on /
 python3 tests/test_allowlist.py    # also runs in `nix flake check`
 nix fmt .
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
