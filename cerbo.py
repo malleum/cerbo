@@ -40,9 +40,11 @@ KNOWN_TOOLS = [
     "wl-copy", "rg", "fd", "nh",
 ]
 
-# argv0 -> subcommands that only read. None means any arguments are fine.
-# Deliberately absent: env/xargs/find/fd/awk/sed/uniq (each can run or write
-# something given the right argument), and anything that takes a file to write.
+# argv0 -> what counts as read-only: None for any arguments, a set of allowed
+# first arguments, or a predicate on the whole argv. Deliberately absent:
+# env/xargs/find/fd/awk/sed/uniq (each can run or write something given the
+# right argument), curl, `nix eval`/`nix build` (both can fetch and build
+# arbitrary things), and anything that takes a file to write.
 READ_ONLY = {
     "ls": None, "cat": None, "head": None, "tail": None, "wc": None,
     "grep": None, "rg": None, "jq": None, "sort": None, "cut": None, "tr": None,
@@ -50,15 +52,27 @@ READ_ONLY = {
     "uname": None, "hostname": None, "date": None, "id": None, "whoami": None,
     "ps": None, "pgrep": None, "lsblk": None, "df": None, "du": None,
     "free": None, "uptime": None, "realpath": None, "readlink": None,
-    "stat": None, "file": None, "journalctl": None,
+    "stat": None, "file": None, "journalctl": None, "ss": None,
+    "findmnt": None, "lspci": None, "lsusb": None, "lscpu": None, "nproc": None,
+    "numfmt": None,
+    "nixos-version": None,
+    "ip": {"addr", "address", "a", "link", "l", "route", "r", "neigh", "-br",
+           "-brief", "-j", "-json", "-4", "-6", "-c", "-color"},
+    "nix": lambda argv: argv[1:2] in (["path-info"], ["why-depends"], ["--version"])
+    or argv[1:3] == ["store", "diff-closures"],
+    "nix-store": lambda argv: len(argv) > 1
+    and (argv[1] == "--query" or re.fullmatch(r"-q[a-zA-Z]*", argv[1]) is not None),
+    "nixos-rebuild": {"list-generations"},
     "wpctl": {"status", "inspect", "get-volume"},
     "pactl": {"list", "info", "get-default-sink", "get-default-source",
               "get-sink-volume", "get-sink-mute", "-f"},
     "jay": {"randr", "version", "clients", "tree"},
     "hyprctl": {"monitors", "workspaces", "clients", "devices", "activewindow", "-j"},
-    "nmcli": {"device", "connection", "general", "-t", "-f"},
+    "nmcli": {"device", "dev", "d", "connection", "con", "c", "general", "g",
+              "-t", "-f", "-g", "--fields", "--get-values"},
     "bluetoothctl": {"devices", "info", "show", "list"},
-    "systemctl": {"status", "is-active", "is-enabled", "list-units", "list-timers", "--user"},
+    "systemctl": {"status", "is-active", "is-enabled", "is-failed", "list-units",
+                  "list-unit-files", "list-timers", "show", "cat", "--failed", "--user"},
     "playerctl": {"status", "metadata", "-l", "--list-all"},
     "brightnessctl": {"get", "info", "-l"},
 }
@@ -70,6 +84,7 @@ WRITE_WORDS = {
     "set", "output", "card", "connect", "disconnect", "up", "down", "delete",
     "modify", "start", "stop", "restart", "enable", "disable", "kill",
     "dispatch", "keyword", "reload", "remove", "pair", "trust", "power",
+    "add", "del", "flush", "replace", "change", "append", "prepend",  # ip
     "--pre",  # rg runs this as a preprocessor
     "--output",  # sort
 }
@@ -120,7 +135,10 @@ def read_only(command: str) -> bool:
         if argv[0] == "sort" and any(re.fullmatch(r"-[a-zA-Z]*o.*", a) for a in argv[1:]):
             return False
         allowed = READ_ONLY[argv[0]]
-        if allowed is not None and len(argv) > 1 and argv[1] not in allowed:
+        if callable(allowed):
+            if not allowed(argv):
+                return False
+        elif allowed is not None and len(argv) > 1 and argv[1] not in allowed:
             return False
     return True
 
@@ -149,9 +167,23 @@ Rules:
   user approve it, so prefer the first kind when it can do the job.
 - NixOS: a missing program can be run with `nix run nixpkgs#<pkg> -- <args>`.
   Never edit files under /etc or the nix store, never use sudo.
-- If a command fails, read the error and try a different approach.
+- If a command fails, read the error and try a different approach. Never run
+  the same command twice.
 - When the task is done (or impossible), stop calling tools and reply with ONE
   short sentence saying what you changed. No markdown.
+
+Recipes (use these when they fit, instead of working it out):
+- Wifi network name: `nmcli -t -f active,ssid dev wifi | grep '^yes'`
+- Local addresses: `ip -br addr`. Public IP: `curl -s ifconfig.me`
+- Biggest store paths in the system closure (column 2 is the path's own size,
+  column 3 its closure):
+  `nix path-info -rsS /run/current-system | sort -k2 -n | tail -n 10 | numfmt --field=2,3 --to=iec`
+- NixOS generations: `nixos-rebuild list-generations`. What changed between
+  two: `nix store diff-closures /nix/var/nix/profiles/system-<A>-link /nix/var/nix/profiles/system-<B>-link`
+- Failed units: `systemctl --failed` and `systemctl --user --failed`, then
+  `journalctl -u <unit> -n 30 --no-pager` (add --user for user units)
+- What listens on a port: `ss -ltnp`
+- What fills a directory: `du -sh <dir>/* | sort -h | tail`
 {chr(10) + hints if hints else ''}"""
 
 
@@ -199,11 +231,11 @@ class Spinner:
             sys.stderr.write("\r\033[K")
 
 
-def chat(messages: list) -> dict:
+def chat(messages: list, tools: bool = True) -> dict:
     body = json.dumps({
         "model": MODEL,
         "messages": messages,
-        "tools": TOOLS,
+        **({"tools": TOOLS} if tools else {}),
         "temperature": 0.3,
     }).encode()
     req = urllib.request.Request(
@@ -242,24 +274,42 @@ def run(command: str) -> str:
     return out or "[no output]"
 
 
+def unload() -> int:
+    """`cerbo off`: free the VRAM now instead of waiting out llama-swap's ttl."""
+    root = URL.removesuffix("/").removesuffix("/v1")
+    try:
+        with urllib.request.urlopen(f"{root}/running", timeout=5) as resp:
+            running = [m["model"] for m in json.load(resp).get("running", [])]
+        if running:
+            urllib.request.urlopen(f"{root}/unload", timeout=30).close()
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as e:
+        print(color("31", f"cerbo: could not unload via {root}: {e}"), file=sys.stderr)
+        return 1
+    print(f"unloaded {', '.join(running)}" if running else "nothing loaded")
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Do something in the shell via the local model.")
     p.add_argument("-y", "--yes", action="store_true", help="run every command without asking")
     p.add_argument("-v", "--verbose", action="store_true", help="show command output")
-    p.add_argument("task", nargs="+")
+    p.add_argument("task", nargs="+", help="what to do, or `off` to unload the model")
     args = p.parse_args()
+    if args.task == ["off"]:
+        return unload()
 
     messages = [
         {"role": "system", "content": system_prompt()},
         {"role": "user", "content": " ".join(args.task)},
     ]
-    changed = []
+    changed, ran = [], set()
 
     for _ in range(MAX_STEPS):
         try:
             msg = chat(messages)
         except (urllib.error.URLError, TimeoutError) as e:
-            print(color("31", f"cerbo: model unreachable at {URL}: {e}"), file=sys.stderr)
+            print(color("31", f"cerbo: model unreachable at {URL} (server or tunnel down?): {e}"),
+                  file=sys.stderr)
             return 1
         messages.append(msg)
 
@@ -278,6 +328,15 @@ def main() -> int:
             except (KeyError, json.JSONDecodeError):
                 result = "error: arguments must be JSON with a 'command' string"
             else:
+                if command in ran:
+                    # 9B models loop. Answering for them breaks the loop
+                    # without costing the user a prompt.
+                    result = ("You already ran exactly this command; its output is above. "
+                              "Do something different, or answer with what you know.")
+                    messages.append({"role": "tool", "tool_call_id": call.get("id", ""),
+                                     "content": result})
+                    continue
+                ran.add(command)
                 safe = read_only(command)
                 print(color("2" if safe else "1;33", f"$ {command}"), file=sys.stderr)
                 answer = "y" if safe or args.yes else ask(color("1", "run? [Y/n/q] "))
@@ -297,7 +356,20 @@ def main() -> int:
                 "content": result,
             })
 
-    print(color("31", f"cerbo: gave up after {MAX_STEPS} steps"), file=sys.stderr)
+    # Out of steps: one last call with no tools, so the user still gets
+    # whatever it found instead of nothing.
+    print(color("31", f"cerbo: out of steps after {MAX_STEPS}"), file=sys.stderr)
+    messages.append({"role": "user", "content": (
+        "Step limit reached. Without running anything else, say in one or two "
+        "sentences what you found and what is still unresolved.")})
+    try:
+        reply = (chat(messages, tools=False).get("content") or "").replace("**", "").strip()
+    except (urllib.error.URLError, TimeoutError):
+        reply = ""
+    if reply:
+        print(reply)
+    if changed:
+        print(color("2", "ran: " + " ; ".join(changed)), file=sys.stderr)
     return 1
 
 

@@ -18,6 +18,8 @@ commands that changed something.
 cerbo [-y] [-v] <task...>
   -y  run every command without asking
   -v  show command output
+
+cerbo off   unload the model now (e.g. before a game) instead of waiting out the ttl
 ```
 
 ## Pieces
@@ -72,6 +74,24 @@ stack is queried. Without hints it tends to wander until it hits the step
 limit; with them it usually gets there in three or four commands. If it keeps
 getting something wrong, add a line.
 
+## Other machines
+
+The model only needs to run on one machine. On the others, set
+`programs.cerbo.tunnel.host` to an ssh destination that runs `services.cerbo`.
+A user service then keeps `ssh -L` open to it, so cerbo runs commands on the
+local machine while the model runs on the remote one:
+
+```nix
+programs.cerbo = {
+  enable = true;
+  tunnel.host = "desktop"; # whatever ~/.ssh/config says (ProxyJump, keys) applies
+};
+```
+
+The ssh connection has to work without prompts (it uses `BatchMode`), so the
+key must be loaded and the host key already known. If the server is down,
+cerbo says the model is unreachable, and the tunnel retries every 30 s.
+
 ## Options
 
 | Option | Default | |
@@ -85,6 +105,10 @@ getting something wrong, add a line.
 | `services.cerbo.extraArgs` | `[]` | extra llama-server flags |
 | `programs.cerbo.url` | `null` | endpoint, e.g. `http://desktop:8091/v1` |
 | `programs.cerbo.hints` | `""` | appended to the system prompt |
+| `programs.cerbo.tunnel.host` | `null` | ssh destination running `services.cerbo` |
+| `programs.cerbo.tunnel.localPort` | `8091` | local end; `CERBO_URL` follows it |
+| `programs.cerbo.tunnel.remotePort` | `8091` | server's `services.cerbo.port` |
+| `programs.cerbo.tunnel.sshArgs` | `[]` | extra ssh arguments |
 
 `CERBO_URL` and `CERBO_MODEL` override the endpoint and model name at runtime.
 
