@@ -1,5 +1,6 @@
 {
   lib,
+  stdenv,
   writers,
   symlinkJoin,
   makeWrapper,
@@ -18,11 +19,11 @@ in
     nativeBuildInputs = [makeWrapper];
     postBuild = ''
       wrapProgram $out/bin/cerbo \
-        --suffix PATH : ${lib.makeBinPath [pulseaudio jq]}
+        --suffix PATH : ${lib.makeBinPath ([jq] ++ lib.optional stdenv.hostPlatform.isLinux pulseaudio)}
     '';
     meta = {
       description = "Ask a local model to do something in the shell";
       mainProgram = "cerbo";
-      platforms = lib.platforms.linux;
+      platforms = lib.platforms.unix;
     };
   }

@@ -3,119 +3,166 @@
 Ask a local model to do something in the shell.
 
 ```console
-$ cerbo what is my default audio output and what volume is it at
-$ wpctl status
-Your default audio output is USB Audio Speakers at 50% volume.
+$ cerbo what wifi am I on and what is my local ip
+$ nmcli -t -f active,ssid dev wifi | grep '^yes'
+$ ip -br addr
+You are on HomeNet; your local IPv4 address is 192.168.1.42.
+
+$ cerbo -t Mi ŝatas programi en la vespero
+I like programming in the evening.
 ```
 
-The model gets one tool, `run_shell`, and up to ten turns to look around and
-act. Every command is printed before it runs. Read-only commands from a short
-allowlist (`ls`, `jq`, `df`, `wpctl status`, ...) run straight away. Anything
-else waits for `[Y/n/q]`. At the end it prints a one-line summary, plus the
-commands that changed something.
+One machine with a GPU runs the model. Any number of machines run the
+`cerbo` command and reach that model over ssh. Commands always run on the
+machine where you typed `cerbo`; only the model calls travel.
 
-```
-cerbo [-y] [-v] <task...>
-  -y  run every command without asking
-  -v  show command output
+**Setup:** [docs/setup.md](docs/setup.md) walks through it step by step, with
+a check after each step. If something doesn't work, see
+[docs/troubleshooting.md](docs/troubleshooting.md).
 
-cerbo off   unload the model now (e.g. before a game) instead of waiting out the ttl
-```
-
-## Pieces
-
-- **`cerbo.py`**: the CLI. Python standard library only, so it starts fast.
-- **`nixosModules.default`**: `services.cerbo` runs [llama-swap] on loopback
-  in front of llama.cpp (Vulkan). The model loads on the first request and
-  unloads after `ttl` idle seconds, so the VRAM goes back to everything else.
-  The default model is Qwen3.5-9B (UD-Q5_K_XL, 6.7 GB), fetched at build
-  time.
-- **`homeManagerModules.default`**: `programs.cerbo` installs the command
-  and writes `~/.config/cerbo/hints.md`, which holds machine facts appended to
-  the system prompt.
-
-[llama-swap]: https://github.com/mostlygeek/llama-swap
-
-## Use
+## Quick start (NixOS, flakes)
 
 ```nix
-# flake inputs
-cerbo = {
+# flake.nix
+inputs.cerbo = {
   url = "github:malleum/cerbo";
   inputs.nixpkgs.follows = "nixpkgs";
 };
 ```
 
+On the machine with the GPU:
+
 ```nix
-# NixOS
 imports = [inputs.cerbo.nixosModules.default];
-services.cerbo = {
-  enable = true;
-  vulkanDevice = "1002:747e"; # pin to the dGPU, hide the iGPU
-};
-
-# home-manager
-imports = [inputs.cerbo.homeManagerModules.default];
-programs.cerbo = {
-  enable = true;
-  hints = ''
-    - Displays (jay): `jay randr show` lists connectors with product name,
-      `physical size: W mm x H mm`, and disconnected/disabled state.
-      Enable one with `jay randr output <CONNECTOR> enable`.
-    - Audio is PipeWire. `wpctl status` lists sinks by id (`*` = default);
-      `wpctl set-default <id>` changes it. pactl needs `-f json` before the
-      subcommand for JSON output.
-  '';
-};
+services.cerbo.enable = true; # model server + the cerbo command
 ```
 
-The hints matter. A 9B model will not guess how your compositor or audio
-stack is queried. Without hints it tends to wander until it hits the step
-limit; with them it usually gets there in three or four commands. If it keeps
-getting something wrong, add a line.
-
-## Other machines
-
-The model only needs to run on one machine. On the others, set
-`programs.cerbo.tunnel.host` to an ssh destination that runs `services.cerbo`.
-A user service then keeps `ssh -L` open to it, so cerbo runs commands on the
-local machine while the model runs on the remote one:
+On every other machine (anything you can `ssh` to the GPU machine from):
 
 ```nix
+imports = [inputs.cerbo.nixosModules.default];
 programs.cerbo = {
   enable = true;
-  tunnel.host = "desktop"; # whatever ~/.ssh/config says (ProxyJump, keys) applies
+  tunnel.host = "me@desktop"; # any ssh destination or ~/.ssh/config alias
 };
 ```
 
-The ssh connection has to work without prompts (it uses `BatchMode`), so the
-key must be loaded and the host key already known. If the server is down,
-cerbo says the model is unreachable, and the tunnel retries every 30 s.
+Then try `cerbo how much free space is on /`.
+
+Home-manager users can use `inputs.cerbo.homeManagerModules.default` for the
+client instead; it has the same `programs.cerbo` options.
+
+## Using it
+
+```
+cerbo [-y] [-v] <task...>   do something
+  -y                        run every command without asking
+  -v                        show command output
+cerbo -t <text>             translate to English (source language detected)
+cerbo -T <lang> <text>      translate to <lang>
+echo ... | cerbo -t         text from stdin works too
+cerbo off                   unload the model now (e.g. before a game)
+```
+
+The model gets one tool, `run_shell`, and up to ten turns to look around and
+act. Every command is printed before it runs:
+
+- **Read-only commands run straight away.** That covers `ls`, `cat`, `grep`,
+  `jq`, `df`, `ps`, `ss`, `wpctl status`, `nmcli`, `ip addr`, `systemctl
+  status`, `journalctl`, `git status/diff/log/show`, `nix path-info`,
+  `fastfetch`, `qalc` and similar. The full list is `READ_ONLY` in `cerbo.py`,
+  and it's tested in `tests/test_allowlist.py`.
+- **Everything else waits for `[Y/n/q, or type a reply]`.** Anything other
+  than y/n/q goes to the model as your answer, e.g. "no, use trash instead"
+  or "misclick, run it".
+- **Declined or out of steps:** if a run ends on a command you declined, or
+  on the step limit, a `>` prompt lets you keep going in the same
+  conversation. Enter quits.
+
+It's a 9B model, so read the yellow (unapproved) commands before pressing `y`.
+
+Things it does well: "move all audio to my headphones", "which services failed
+and why", "what's using port 8080", "which of my repos have uncommitted
+changes", "what are the biggest paths in my system closure", "solve x^2 = 2x +
+3", "how good are this machine's specs".
+
+## How it fits together
+
+```
+ laptop                         ssh -L (cerbo-tunnel)           desktop with GPU
+ cerbo ──HTTP──> 127.0.0.1:8091 ═══════════════════════> 127.0.0.1:8091 llama-swap
+   └─ runs commands here                                     └─ llama-server + model
+                                                                loads on first request,
+                                                                unloads after `ttl`
+```
+
+- **`cerbo.py`** is the client. It uses only the Python standard library, so
+  it starts fast. Its system prompt is built for the machine it runs on: OS,
+  desktop session, which tools are installed, and recipes for only those tools
+  (PipeWire, NetworkManager, systemd, git, nix, fastfetch, qalc, and the
+  running compositor: jay, Hyprland, sway, niri, other wlroots, or X11).
+- **`services.cerbo`** (NixOS) runs [llama-swap] in front of llama.cpp, on
+  loopback only: the API has no authentication. The model is fetched at
+  build time and pinned by hash.
+- **`programs.cerbo`** (NixOS or home-manager) installs the command, writes
+  your hints, and holds the ssh tunnel to the GPU machine.
+
+[llama-swap]: https://github.com/mostlygeek/llama-swap
+
+## Hints
+
+Built-in recipes cover the common tools. What a small model cannot guess
+about *your* machine goes in `hints`: where your repos live, which output is
+the TV, quirks of your setup. One line here saves it several wrong commands.
+
+```nix
+programs.cerbo.hints = ''
+  - Repos are in ~/src/<name>; the NixOS config is /etc/nixos.
+  - The TV is HDMI-A-1; its audio sink has "HDMI" in the name.
+'';
+```
+
+System hints (`/etc/cerbo/hints.md`) and user hints
+(`~/.config/cerbo/hints.md`) are both read.
 
 ## Options
 
+**`services.cerbo`** (NixOS, on the GPU machine)
+
 | Option | Default | |
 | :--- | :--- | :--- |
-| `services.cerbo.port` | `8091` | loopback port |
-| `services.cerbo.model` | Qwen3.5-9B UD-Q5_K_XL | any GGUF with tool calling |
-| `services.cerbo.llamaCpp` | llama-cpp with Vulkan | swap for a ROCm/CUDA build |
-| `services.cerbo.contextSize` | `16384` | |
-| `services.cerbo.ttl` | `600` | idle seconds before unload, `0` = never |
-| `services.cerbo.vulkanDevice` | `null` | `vendor:device` PCI id to run on |
-| `services.cerbo.extraArgs` | `[]` | extra llama-server flags |
-| `programs.cerbo.url` | `null` | endpoint, e.g. `http://desktop:8091/v1` |
-| `programs.cerbo.hints` | `""` | appended to the system prompt |
-| `programs.cerbo.tunnel.host` | `null` | ssh destination running `services.cerbo` |
-| `programs.cerbo.tunnel.localPort` | `8091` | local end; `CERBO_URL` follows it |
-| `programs.cerbo.tunnel.remotePort` | `8091` | server's `services.cerbo.port` |
-| `programs.cerbo.tunnel.sshArgs` | `[]` | extra ssh arguments |
+| `enable` | `false` | |
+| `port` | `8091` | loopback only |
+| `acceleration` | `"vulkan"` | `vulkan` (AMD, Intel, NVIDIA), `rocm`, `cuda` (unfree), `cpu` |
+| `llamaCpp` | built for `acceleration` | any llama.cpp package |
+| `model` | `"qwen3.5-9b"` | `"qwen3.5-4b"` for ≤6 GB GPUs or CPU, or a path to any GGUF with tool calling |
+| `contextSize` | `16384` | |
+| `reasoning` | `false` | think first: better on hard tasks, ~3x slower |
+| `ttl` | `600` | idle seconds before unload, `0` = never |
+| `vulkanDevice` | `null` | `vendor:device` PCI id, to keep it off an iGPU |
+| `environment` | `{}` | extra env, e.g. `HSA_OVERRIDE_GFX_VERSION` |
+| `extraArgs` | `[]` | extra llama-server flags (e.g. `--n-cpu-moe 24` for big MoE models) |
 
-`CERBO_URL` and `CERBO_MODEL` override the endpoint and model name at runtime.
+**`programs.cerbo`** (NixOS and home-manager, on every machine)
+
+| Option | Default | |
+| :--- | :--- | :--- |
+| `enable` | `false` (on with `services.cerbo`) | |
+| `tunnel.host` | `null` | ssh destination running `services.cerbo` |
+| `tunnel.sshArgs` | `[]` | extra ssh arguments, e.g. `["-J" "me@relay"]` |
+| `tunnel.localPort` | `8091` | local end of the tunnel |
+| `tunnel.remotePort` | `8091` | the server's `services.cerbo.port` |
+| `hints` | `""` | appended to the system prompt |
+| `url` | `null` → `http://127.0.0.1:8091/v1` | another OpenAI-compatible server (Ollama, ...) |
+| `model` | `null` → `"cerbo"` | model name on that server |
+
+`CERBO_URL` and `CERBO_MODEL` override the endpoint and model at runtime.
 
 ## Develop
 
 ```sh
-direnv allow                # or nix develop
+direnv allow                       # or nix develop
 python3 cerbo.py -v how much free space is on /
-nix fmt . && flake8 --ignore E501,E731,W503 cerbo.py
+python3 tests/test_allowlist.py    # also runs in `nix flake check`
+nix fmt .
 ```

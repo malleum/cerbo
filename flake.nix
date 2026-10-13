@@ -12,11 +12,21 @@
       default = cerbo;
     });
 
-    # The server side: llama-swap serving the model on loopback.
+    # services.cerbo (llama-swap serving the model) and programs.cerbo (the
+    # command, hints and optional ssh tunnel) for NixOS.
     nixosModules.default = ./nix/nixos.nix;
 
-    # The client side: the cerbo command and its hints file.
+    # programs.cerbo for home-manager; same options as the NixOS one.
     homeManagerModules.default = ./nix/home.nix;
+    homeModules.default = ./nix/home.nix;
+
+    checks = forAll (pkgs: {
+      allowlist = pkgs.runCommand "cerbo-allowlist" {} ''
+        cd ${./.}
+        ${pkgs.python3}/bin/python3 tests/test_allowlist.py
+        touch $out
+      '';
+    });
 
     devShells = forAll (pkgs: {
       default = pkgs.mkShell {
