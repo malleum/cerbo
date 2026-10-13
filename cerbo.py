@@ -67,7 +67,12 @@ READ_ONLY = {
     "nix": lambda argv: argv[1:2] in (["path-info"], ["why-depends"], ["--version"])
     or argv[1:3] == ["store", "diff-closures"],
     "nix-store": lambda argv: len(argv) > 1
-    and (argv[1] == "--query" or re.fullmatch(r"-q[a-zA-Z]*", argv[1]) is not None),
+    and (argv[1] == "--query" or re.fullmatch(r"-q[a-zA-Z]*", argv[1]) is not None
+         or (argv[1] == "--gc" and len(argv) == 3 and argv[2] in ("--print-dead", "--print-live", "--print-roots"))),
+    "xargs": lambda argv: xargs_read_only(argv),
+    # nh only reads when searching or cleaning with --dry.
+    "nh": lambda argv: argv[1:2] == ["search"]
+    or (argv[1:2] == ["clean"] and any(a in ("--dry", "-n") for a in argv)),
     "nixos-rebuild": {"list-generations"},
     "cd": None,  # only lasts for this one bash -c
     "fastfetch": lambda argv: not any(a.startswith("--gen-config") for a in argv),
@@ -189,22 +194,31 @@ def read_only(command: str) -> bool:
         i += 1
     segments.append(current)
 
-    for argv in segments:
-        argv = [a for a in argv if a not in ("1", "2")]  # fd numbers left by 2>/dev/null
-        if not argv or argv[0] not in READ_ONLY:
-            return False
-        if any(writes(a) for a in argv[1:]):
-            return False
-        # sort -o FILE, also bundled as -uo FILE
-        if argv[0] == "sort" and any(re.fullmatch(r"-[a-zA-Z]*o.*", a) for a in argv[1:]):
-            return False
-        allowed = READ_ONLY[argv[0]]
-        if callable(allowed):
-            if not allowed(argv):
-                return False
-        elif allowed is not None and len(argv) > 1 and argv[1] not in allowed:
-            return False
-    return True
+    return all(segment_read_only([a for a in argv if a not in ("1", "2")])  # fd numbers left by 2>/dev/null
+               for argv in segments)
+
+
+def segment_read_only(argv: list) -> bool:
+    if not argv or argv[0] not in READ_ONLY:
+        return False
+    if any(writes(a) for a in argv[1:]):
+        return False
+    # sort -o FILE, also bundled as -uo FILE
+    if argv[0] == "sort" and any(re.fullmatch(r"-[a-zA-Z]*o.*", a) for a in argv[1:]):
+        return False
+    allowed = READ_ONLY[argv[0]]
+    if callable(allowed):
+        return bool(allowed(argv))
+    return allowed is None or len(argv) == 1 or argv[1] in allowed
+
+
+def xargs_read_only(argv: list) -> bool:
+    """xargs runs whatever follows its options; fine when that is read-only."""
+    rest = argv[1:]
+    while rest and rest[0].startswith("-"):
+        takes_value = rest[0] in ("-n", "-P", "-L", "-d", "-I", "-s", "-E")
+        rest = rest[2:] if takes_value else rest[1:]
+    return segment_read_only(rest)
 
 
 def os_name() -> str:
@@ -246,8 +260,14 @@ RECIPES = [
     ("fastfetch", "Hardware and system summary in one command: "
                   "`fastfetch --pipe --logo none -s Host:CPU:GPU:Memory:Disk:Display:OS:Kernel`"),
     ("qalc", "Math: compute it with qalc rather than in your head. `qalc -t '2^64 / 3'`, "
+             "`qalc -t '(10033688 / 20) s to h'`, "
              "equations `qalc -t 'solve(x^2 - 6x + 8 = 0)'`, systems "
              "`qalc -t 'solve2(x*y = 8, x + y = 6, x, y)'`, units `qalc -t '5 ft to cm'`."),
+    ("nh", "NixOS rebuilds and cleanup go through nh, which finds the flake itself "
+           "($NH_FLAKE): `nh os switch` (build and activate), `nh os boot` (activate on next "
+           "boot), `nh os build` (build only), `nh os switch -u` (update inputs first). "
+           "`nh clean all --dry` lists what cleaning would delete, without deleting. "
+           "`nh search <name>` finds packages."),
     ("du", "What fills a directory: `du -sh <dir>/* | sort -h | tail`."),
     ("git", "Is a git repo clean and pushed: `git -C <dir> status -sb` (no file lines and "
             "no [ahead N] = nothing to lose locally)."),
@@ -259,6 +279,9 @@ NIX_RECIPES = [
     "Biggest store paths in the system closure (column 2 is the path's own size, "
     "column 3 its closure): "
     "`nix path-info -rsS /run/current-system | sort -k2 -n | tail -n 10 | numfmt --field=2,3 --to=iec`",
+    "Space reclaimable right now by garbage collection (read-only, ~10 s): "
+    "`nix-store --gc --print-dead | xargs -r du -sch | tail -1`. Deleting old "
+    "generations frees more on top; `nh clean all --dry` lists those.",
     "NixOS generations: `nixos-rebuild list-generations`. What changed between two: "
     "`nix store diff-closures /nix/var/nix/profiles/system-<A>-link /nix/var/nix/profiles/system-<B>-link`",
 ]
@@ -287,6 +310,8 @@ def system_prompt() -> str:
         "(e.g. `lscpu | head -20; free -h; df -h /`), not one command per fact.",
         "Only state what command output showed. If something is unknown, say so; never guess "
         "a model name, number or result.",
+        "For questions about what something WOULD do (how much would X free, what would "
+        "Y change), never do it: use its dry-run flag (--dry, -n, --dry-run) or a read-only query.",
         "Never use sudo.",
         "If a command fails, read the error and try a different approach. Never run "
         "the same command twice.",
@@ -294,6 +319,8 @@ def system_prompt() -> str:
         "short sentence saying what you changed or found. Plain text for a terminal: "
         "no markdown, no LaTeX (write x^2, sqrt(3), =>).",
     ]
+    if shutil.which("qalc"):
+        rules.append("Never do arithmetic or unit conversion in your head: use qalc.")
     if shutil.which("nix"):
         rules.append("A missing program can be run with `nix run nixpkgs#<pkg> -- <args>`.")
     if NIXOS:
@@ -381,6 +408,19 @@ def chat(messages: list, tools: bool = True) -> dict:
     with Spinner():
         with urllib.request.urlopen(req, timeout=300) as resp:
             return json.load(resp)["choices"][0]["message"]
+
+
+# Commands that delete or discard. They still only run with a yes, but get red
+# and an Enter that means no: "how much would cleaning free" once ran
+# `nh clean all` on a reflexive Enter.
+DANGER = re.compile(
+    r"(^|[\s;&|(])(rm|rmdir|shred|dd|mkfs[.\w]*|wipefs|truncate|kill|pkill|killall)\s"
+    r"|\b(clean|gc|collect-garbage|delete|prune|purge|drop|uninstall|remove|wipe|format)\b"
+    r"|--delete|reset\s+--hard|push\s+(-f|--force)")
+
+
+def dangerous(command: str) -> bool:
+    return bool(DANGER.search(command)) and not re.search(r"(^|\s)(--dry(-run)?|-n)(\s|$)", command)
 
 
 def ask(prompt: str) -> str:
@@ -629,9 +669,15 @@ def agent(messages: list, args, changed: list, ran: set) -> str:
                               "Do something different, or answer with what you know.")
                 else:
                     safe = read_only(command)
-                    print(color("2" if safe else "1;33", f"$ {command}"), file=sys.stderr)
-                    answer = "y" if safe or args.yes else ask(
-                        color("1", "run? [Y/n/q, or type a reply] "))
+                    danger = not safe and dangerous(command)
+                    print(color("2" if safe else "1;31" if danger else "1;33", f"$ {command}"),
+                          file=sys.stderr)
+                    if safe or args.yes:
+                        answer = "y"
+                    elif danger:
+                        answer = ask(color("1;31", "deletes things. run? [y/N/q, or type a reply] ")) or "n"
+                    else:
+                        answer = ask(color("1", "run? [Y/n/q, or type a reply] "))
                     if answer.lower() == "q":
                         return "quit"
                     if answer.lower() in ("", "y", "yes"):

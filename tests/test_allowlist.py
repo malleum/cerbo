@@ -23,6 +23,9 @@ READ_ONLY = [
     "git remote show origin", "git stash list", "git config --get user.name", "git reflog",
     "git worktree list", "git rev-parse --show-toplevel", "git ls-remote origin",
     "swaymsg -t get_outputs -r", "niri msg outputs", "wlr-randr", "xrandr --query",
+    "nix-store --gc --print-dead | xargs -r du -sch | tail -1", "nh clean all --dry",
+    "nh clean all -n", "nh search firefox", "ls | xargs -r du -sh", "fastfetch --pipe",
+    "qalc -t '(10033688 / 20) s to h'",
 ]
 
 ASKS = [
@@ -40,10 +43,22 @@ ASKS = [
     "git clean -fd", "git reflog expire --all", "git worktree add x", "git -C", "git",
     "swaymsg exit", "swaymsg -t command exit", "niri msg action quit",
     "wlr-randr --output X --off", "xrandr --output X --off",
+    "nix-store --gc", "nix-store --gc --print-dead --delete", "nh clean all", "nh os switch",
+    "ls | xargs rm", "ls | xargs -r sh -c 'rm x'", "ls | xargs -I{} cp {} /tmp",
+    "fastfetch --gen-config", "qalc -t 'command(\"rm\")'",
 ]
 
-wrong = [c for c in READ_ONLY if not cerbo.read_only(c)] + [c for c in ASKS if cerbo.read_only(c)]
+# Which unapproved commands get the red, default-No prompt.
+DANGEROUS = ["nh clean all", "rm -rf ~/x", "git reset --hard", "nix-store --gc",
+             "nix-collect-garbage -d", "docker system prune", "git push --force", "pkill firefox"]
+SAFE_ENOUGH = ["nh os switch", "wpctl set-default 42", "nh clean all --dry", "git commit -m x",
+               "jay randr output DP-2 enable", "mkdir -p /tmp/x"]
+
+wrong = ([c for c in READ_ONLY if not cerbo.read_only(c)] + [c for c in ASKS if cerbo.read_only(c)]
+         + [f"danger: {c}" for c in DANGEROUS if not cerbo.dangerous(c)]
+         + [f"not danger: {c}" for c in SAFE_ENOUGH if cerbo.dangerous(c)])
 for c in wrong:
     print("misclassified:", c)
-print(f"{len(READ_ONLY) + len(ASKS) - len(wrong)}/{len(READ_ONLY) + len(ASKS)} ok")
+total = len(READ_ONLY) + len(ASKS) + len(DANGEROUS) + len(SAFE_ENOUGH)
+print(f"{total - len(wrong)}/{total} ok")
 sys.exit(1 if wrong else 0)
