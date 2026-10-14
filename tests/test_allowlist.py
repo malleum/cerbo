@@ -27,6 +27,9 @@ READ_ONLY = [
     "nh clean all -n", "nh search firefox", "ls | xargs -r du -sh", "fastfetch --pipe",
     "qalc -t '(10033688 / 20) s to h'",
     "grep -H . /sys/class/drm/card*/device/mem_info_vram_total | numfmt -d: --field=2 --to=iec",
+    "nix shell nixpkgs#vulkan-tools -c vulkaninfo --summary",
+    "nix shell nixpkgs#pciutils -c lspci -nn | grep -i vga",
+    "nix shell nixpkgs#pciutils nixpkgs#usbutils --command lsusb",
 ]
 
 ASKS = [
@@ -47,6 +50,11 @@ ASKS = [
     "nix-store --gc", "nix-store --gc --print-dead --delete", "nh clean all", "nh os switch",
     "ls | xargs rm", "ls | xargs -r sh -c 'rm x'", "ls | xargs -I{} cp {} /tmp",
     "fastfetch --gen-config", "qalc -t 'command(\"rm\")'",
+    "nix shell nixpkgs#coreutils -c rm x", "nix shell nixpkgs#hello", "nix shell nixpkgs#bash -c bash",
+    "nix shell github:evil/flake#x -c ls", "nix shell nixpkgs#pciutils --override-input nixpkgs x -c lspci",
+    "nix shell --impure nixpkgs#x -c ls", "nix shell nixpkgs#./x -c ls", "nix shell -c ls",
+    "nix run nixpkgs#pciutils -- -nn",
+    "ls a#; rm -rf x", "ls a# ; rm x", "ls #x\nrm y", "echo a#b && rm x", "ls a\nrm -rf x",
 ]
 
 # Which unapproved commands get the red, default-No prompt.

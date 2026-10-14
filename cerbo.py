@@ -60,12 +60,13 @@ READ_ONLY = {
     "free": None, "uptime": None, "realpath": None, "readlink": None,
     "stat": None, "file": None, "journalctl": None, "ss": None,
     "findmnt": None, "lspci": None, "lsusb": None, "lscpu": None, "nproc": None,
-    "numfmt": None,
+    "numfmt": None, "vulkaninfo": None, "glxinfo": None, "eglinfo": None,
+    "clinfo": None, "sensors": None,
     "nixos-version": None,
     "ip": {"addr", "address", "a", "link", "l", "route", "r", "neigh", "-br",
            "-brief", "-j", "-json", "-4", "-6", "-c", "-color"},
     "nix": lambda argv: argv[1:2] in (["path-info"], ["why-depends"], ["--version"])
-    or argv[1:3] == ["store", "diff-closures"],
+    or argv[1:3] == ["store", "diff-closures"] or nix_shell_read_only(argv),
     "nix-store": lambda argv: len(argv) > 1
     and (argv[1] == "--query" or re.fullmatch(r"-q[a-zA-Z]*", argv[1]) is not None
          or (argv[1] == "--gc" and len(argv) == 3 and argv[2] in ("--print-dead", "--print-live", "--print-roots"))),
@@ -167,13 +168,20 @@ def writes(arg: str) -> bool:
 
 
 def read_only(command: str) -> bool:
-    if any(s in command for s in ("`", "$(", "<(", ">(")):
+    # A newline separates commands in bash but is plain whitespace to shlex.
+    if any(s in command for s in ("`", "$(", "<(", ">(", "\n")):
         return False
     try:
         lex = shlex.shlex(command, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
+        # shlex starts a comment at any #, bash only at the start of a word:
+        # `ls a#; rm x` would hide the rm. Keep # in words, and refuse real
+        # comments rather than parse them.
+        lex.commenters = ""
         tokens = list(lex)
     except ValueError:
+        return False
+    if any(t.startswith("#") for t in tokens):
         return False
 
     segments, current, i = [], [], 0
@@ -210,6 +218,20 @@ def segment_read_only(argv: list) -> bool:
     if callable(allowed):
         return bool(allowed(argv))
     return allowed is None or len(argv) == 1 or argv[1] in allowed
+
+
+def nix_shell_read_only(argv: list) -> bool:
+    """`nix shell nixpkgs#a nixpkgs#b -c <cmd>`: fetching a nixpkgs package changes
+    nothing outside the store, so it is as read-only as <cmd>. Only bare nixpkgs
+    attributes and no options: --override-input or a github: flake could run
+    anyone's code, and `nix run` would hand our arguments to an unknown program."""
+    if argv[1:2] != ["shell"]:
+        return False
+    rest = argv[2:]
+    pkgs = 0
+    while rest and re.fullmatch(r"nixpkgs#[A-Za-z0-9_+-]+(\.[A-Za-z0-9_+-]+)*", rest[0]):
+        rest, pkgs = rest[1:], pkgs + 1
+    return pkgs > 0 and rest[:1] in (["-c"], ["--command"]) and segment_read_only(rest[1:])
 
 
 def xargs_read_only(argv: list) -> bool:
@@ -322,7 +344,9 @@ def system_prompt() -> str:
     if shutil.which("qalc"):
         rules.append("Never do arithmetic or unit conversion in your head: use qalc.")
     if shutil.which("nix"):
-        rules.append("A missing program can be run with `nix run nixpkgs#<pkg> -- <args>`. "
+        # Not `nix run`: it runs the package's main program, so the natural
+        # `nix run nixpkgs#pciutils -- lspci -nn` runs `lspci lspci -nn`.
+        rules.append("A missing program can be run with `nix shell nixpkgs#<pkg> -c <program> <args>`. "
                      "<pkg> is the package, which is not always the program's name: lspci and "
                      "setpci are in pciutils, lsusb in usbutils, glxinfo in mesa-demos, "
                      "vulkaninfo in vulkan-tools. If nix says it has no such attribute, "
@@ -341,7 +365,13 @@ def system_prompt() -> str:
         recipes.append("GPU memory (VRAM), per card: `grep -H . /sys/class/drm/card*/device/"
                        "mem_info_vram_total | numfmt -d: --field=2 --to=iec` "
                        "(mem_info_vram_used for what is in use). An integrated GPU shows only "
-                       "its small carve-out, so the large one is the discrete card.")
+                       "its small carve-out, so the large one is the discrete card. More per card: "
+                       "`grep -H . /sys/class/drm/card*/device/{mem_info_vram_vendor,"
+                       "current_link_speed,current_link_width,pp_dpm_sclk,pp_dpm_mclk}` "
+                       "(PCIe link; core and memory clock steps, * marks the current one).")
+    if shutil.which("nix"):
+        recipes.append("GPU names, types and driver versions: "
+                       "`nix shell nixpkgs#vulkan-tools -c vulkaninfo --summary`")
     if shutil.which("nvidia-smi"):
         recipes.append("NVIDIA GPU memory: `nvidia-smi --query-gpu=name,memory.total,memory.used "
                        "--format=csv`")
