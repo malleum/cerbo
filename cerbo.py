@@ -322,7 +322,11 @@ def system_prompt() -> str:
     if shutil.which("qalc"):
         rules.append("Never do arithmetic or unit conversion in your head: use qalc.")
     if shutil.which("nix"):
-        rules.append("A missing program can be run with `nix run nixpkgs#<pkg> -- <args>`.")
+        rules.append("A missing program can be run with `nix run nixpkgs#<pkg> -- <args>`. "
+                     "<pkg> is the package, which is not always the program's name: lspci and "
+                     "setpci are in pciutils, lsusb in usbutils, glxinfo in mesa-demos, "
+                     "vulkaninfo in vulkan-tools. If nix says it has no such attribute, "
+                     "`nh search <program>` finds the package.")
     if NIXOS:
         rules.append("NixOS: never edit files under /etc or the nix store; system "
                      "configuration lives in the user's NixOS config.")
@@ -332,6 +336,15 @@ def system_prompt() -> str:
         running = [t for t, name in COMPOSITORS.items() if name in desktop]
         fallback = ["wlr-randr", "xrandr"] if not running else []
         recipes[:0] = [r for tool, r in RECIPES if tool in running + fallback and shutil.which(tool)]
+    # amdgpu (and other DRM drivers) publish VRAM size in sysfs; no tool needed.
+    if any(Path("/sys/class/drm").glob("card*/device/mem_info_vram_total")):
+        recipes.append("GPU memory (VRAM), per card: `grep -H . /sys/class/drm/card*/device/"
+                       "mem_info_vram_total | numfmt -d: --field=2 --to=iec` "
+                       "(mem_info_vram_used for what is in use). An integrated GPU shows only "
+                       "its small carve-out, so the large one is the discrete card.")
+    if shutil.which("nvidia-smi"):
+        recipes.append("NVIDIA GPU memory: `nvidia-smi --query-gpu=name,memory.total,memory.used "
+                       "--format=csv`")
     if not shutil.which("fastfetch"):
         recipes.append("Hardware summary: `lscpu | head -20; free -h; lsblk -d -o NAME,SIZE,MODEL`"
                        + ("; GPU names: `nix run nixpkgs#fastfetch -- --pipe -s GPU`" if shutil.which("nix") else ""))
@@ -415,8 +428,9 @@ def chat(messages: list, tools: bool = True) -> dict:
 # `nh clean all` on a reflexive Enter.
 DANGER = re.compile(
     r"(^|[\s;&|(])(rm|rmdir|shred|dd|mkfs[.\w]*|wipefs|truncate|kill|pkill|killall)\s"
-    r"|\b(clean|gc|collect-garbage|delete|prune|purge|drop|uninstall|remove|wipe|format)\b"
-    r"|--delete|reset\s+--hard|push\s+(-f|--force)")
+    # Not after "--": `--format=csv` asks for CSV, it does not format a disk.
+    r"|(?<!--)\b(clean|gc|collect-garbage|delete|prune|purge|drop|uninstall|remove|wipe|format)\b"
+    r"|--delete|--gc\b|reset\s+--hard|push\s+(-f|--force)")
 
 
 def dangerous(command: str) -> bool:

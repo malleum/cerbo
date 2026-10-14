@@ -26,6 +26,7 @@ READ_ONLY = [
     "nix-store --gc --print-dead | xargs -r du -sch | tail -1", "nh clean all --dry",
     "nh clean all -n", "nh search firefox", "ls | xargs -r du -sh", "fastfetch --pipe",
     "qalc -t '(10033688 / 20) s to h'",
+    "grep -H . /sys/class/drm/card*/device/mem_info_vram_total | numfmt -d: --field=2 --to=iec",
 ]
 
 ASKS = [
@@ -52,7 +53,8 @@ ASKS = [
 DANGEROUS = ["nh clean all", "rm -rf ~/x", "git reset --hard", "nix-store --gc",
              "nix-collect-garbage -d", "docker system prune", "git push --force", "pkill firefox"]
 SAFE_ENOUGH = ["nh os switch", "wpctl set-default 42", "nh clean all --dry", "git commit -m x",
-               "jay randr output DP-2 enable", "mkdir -p /tmp/x"]
+               "jay randr output DP-2 enable", "mkdir -p /tmp/x",
+               "nvidia-smi --query-gpu=memory.total --format=csv"]
 
 wrong = ([c for c in READ_ONLY if not cerbo.read_only(c)] + [c for c in ASKS if cerbo.read_only(c)]
          + [f"danger: {c}" for c in DANGEROUS if not cerbo.dangerous(c)]
